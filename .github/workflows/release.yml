@@ -87,16 +87,6 @@ jobs:
         mkdir -p release_artifacts
         cp _build/EPD-nRF52-sd.hex release_artifacts/EPD-nRF52-v${{ steps.version.outputs.VERSION }}-sd.hex || true
 
-    - name: Build MBR + softdevice + application
-      working-directory: build-nrf52
-      run: |
-        make mbr-sd \
-          MAJOR_VERSION=${{ steps.version.outputs.MAJOR_VERSION }} \
-          MINOR_VERSION=${{ steps.version.outputs.MINOR_VERSION }}
-        # Safely store the artifact immediately
-        mkdir -p release_artifacts
-        cp _build/EPD-nRF52-mbr-sd.hex release_artifacts/EPD-nRF52-v${{ steps.version.outputs.VERSION }}-mbr-sd.hex || true
-
     - name: Build full firmware (bootloader + softdevice + application)
       if: env.HAS_DFU_KEY == 'true'
       working-directory: build-nrf52
