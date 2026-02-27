@@ -1,0 +1,137 @@
+name: Build and Release Firmware
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Install ARM GCC toolchain
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi
+    
+    - name: Install nRF Command Line Tools
+      run: |
+        # Download and install nRF Command Line Tools
+        wget -q https://nsscprodmedia.blob.core.windows.net/prod/software-and-other-downloads/desktop-software/nrf-command-line-tools/sw/versions-10-x-x/10-23-1/nrf-command-line-tools_10.23.1_amd64.deb
+        sudo dpkg -i nrf-command-line-tools_10.23.1_amd64.deb || sudo apt-get install -f -y
+        sudo dpkg -i nrf-command-line-tools_10.23.1_amd64.deb
+        rm nrf-command-line-tools_10.23.1_amd64.deb
+    
+    - name: Install nrfutil (Python package)
+      run: |
+        python3 -m pip install --upgrade pip
+        python3 -m pip install nrfutil
+    
+    - name: Extract version from release tag
+      id: version
+      run: |
+        TAG_NAME="${{ github.event.release.tag_name }}"
+        # Remove 'v' prefix if present (e.g., v1.2.3 -> 1.2.3)
+        VERSION="${TAG_NAME#v}"
+        # Extract major and minor version (e.g., 1.2.3 -> MAJOR=1, MINOR=2)
+        MAJOR_VERSION=$(echo "$VERSION" | cut -d. -f1)
+        MINOR_VERSION=$(echo "$VERSION" | cut -d. -f2)
+        # If no minor version, default to 0
+        if [ -z "$MINOR_VERSION" ]; then
+          MINOR_VERSION=0
+        fi
+        echo "MAJOR_VERSION=$MAJOR_VERSION" >> $GITHUB_OUTPUT
+        echo "MINOR_VERSION=$MINOR_VERSION" >> $GITHUB_OUTPUT
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+        echo "Extracted version: MAJOR=$MAJOR_VERSION, MINOR=$MINOR_VERSION from tag $TAG_NAME"
+    
+    - name: Setup private key for bootloader signing
+      run: |
+        if [ -z "${{ secrets.DFU_PRIVATE_KEY }}" ]; then
+          echo "Warning: DFU_PRIVATE_KEY secret not set. Bootloader builds will fail."
+          echo "To set up: Add DFU_PRIVATE_KEY as a GitHub repository secret containing the private key content."
+        else
+          mkdir -p EPD-nRF5-main/tools
+          echo "${{ secrets.DFU_PRIVATE_KEY }}" > EPD-nRF5-main/tools/priv.pem
+          chmod 600 EPD-nRF5-main/tools/priv.pem
+        fi
+    
+    - name: Build application only
+      working-directory: EPD-nRF5-main/build-nrf52
+      run: |
+        make app \
+          MAJOR_VERSION=${{ steps.version.outputs.MAJOR_VERSION }} \
+          MINOR_VERSION=${{ steps.version.outputs.MINOR_VERSION }}
+    
+    - name: Build softdevice + application
+      working-directory: EPD-nRF5-main/build-nrf52
+      run: |
+        make sd \
+          MAJOR_VERSION=${{ steps.version.outputs.MAJOR_VERSION }} \
+          MINOR_VERSION=${{ steps.version.outputs.MINOR_VERSION }}
+    
+    - name: Build MBR + softdevice + application
+      working-directory: EPD-nRF5-main/build-nrf52
+      run: |
+        make mbr-sd \
+          MAJOR_VERSION=${{ steps.version.outputs.MAJOR_VERSION }} \
+          MINOR_VERSION=${{ steps.version.outputs.MINOR_VERSION }}
+    
+    - name: Build full firmware (bootloader + softdevice + application)
+      working-directory: EPD-nRF5-main/build-nrf52
+      run: |
+        make full \
+          MAJOR_VERSION=${{ steps.version.outputs.MAJOR_VERSION }} \
+          MINOR_VERSION=${{ steps.version.outputs.MINOR_VERSION }} \
+          GENERATE_OTA=1 \
+          KEY_FILE=../tools/priv.pem
+      continue-on-error: true  # Continue even if bootloader signing fails
+    
+    - name: List build artifacts
+      working-directory: EPD-nRF5-main/build-nrf52
+      run: |
+        echo "Build artifacts:"
+        ls -lh _build/*.hex _build/*.zip 2>/dev/null || true
+    
+    - name: Prepare release assets with versioned names
+      working-directory: EPD-nRF5-main/build-nrf52
+      run: |
+        VERSION="${{ steps.version.outputs.VERSION }}"
+        mkdir -p _build/release
+        # Copy and rename files with version numbers
+        [ -f _build/EPD-nRF52.hex ] && cp _build/EPD-nRF52.hex _build/release/EPD-nRF52-v${VERSION}-app.hex || true
+        [ -f _build/EPD-nRF52-sd.hex ] && cp _build/EPD-nRF52-sd.hex _build/release/EPD-nRF52-v${VERSION}-sd.hex || true
+        [ -f _build/EPD-nRF52-mbr-sd.hex ] && cp _build/EPD-nRF52-mbr-sd.hex _build/release/EPD-nRF52-v${VERSION}-mbr-sd.hex || true
+        [ -f _build/EPD-nRF52-full.hex ] && cp _build/EPD-nRF52-full.hex _build/release/EPD-nRF52-v${VERSION}-full.hex || true
+        [ -f _build/EPD-nRF52-ota.zip ] && cp _build/EPD-nRF52-ota.zip _build/release/EPD-nRF52-v${VERSION}-ota.zip || true
+        echo "Release assets prepared:"
+        ls -lh _build/release/ || true
+    
+    - name: Upload release assets
+      uses: softprops/action-gh-release@v1
+      with:
+        files: EPD-nRF5-main/build-nrf52/_build/release/*
+        tag_name: ${{ github.event.release.tag_name }}
+        files_glob: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      continue-on-error: true
+    
+    - name: Create build summary
+      run: |
+        echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Version:** ${{ steps.version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Major:** ${{ steps.version.outputs.MAJOR_VERSION }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Minor:** ${{ steps.version.outputs.MINOR_VERSION }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Firmware Files" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- \`EPD-nRF52-v${{ steps.version.outputs.VERSION }}-app.hex\` - Application only" >> $GITHUB_STEP_SUMMARY
+        echo "- \`EPD-nRF52-v${{ steps.version.outputs.VERSION }}-sd.hex\` - SoftDevice + Application" >> $GITHUB_STEP_SUMMARY
+        echo "- \`EPD-nRF52-v${{ steps.version.outputs.VERSION }}-mbr-sd.hex\` - MBR + SoftDevice + Application" >> $GITHUB_STEP_SUMMARY
+        echo "- \`EPD-nRF52-v${{ steps.version.outputs.VERSION }}-full.hex\` - Bootloader + SoftDevice + Application (complete)" >> $GITHUB_STEP_SUMMARY
+        echo "- \`EPD-nRF52-v${{ steps.version.outputs.VERSION }}-ota.zip\` - OTA update package" >> $GITHUB_STEP_SUMMARY
